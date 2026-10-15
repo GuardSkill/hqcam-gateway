@@ -1,0 +1,12 @@
+# 统一用 LF，避免 Windows 检出把 shell 脚本改成 CRLF 导致容器里执行失败
+* text=auto eol=lf
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# 二进制资源不要做行尾转换
+*.bin binary
+*.jpg binary
+*.png binary
