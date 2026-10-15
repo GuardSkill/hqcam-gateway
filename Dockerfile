@@ -27,7 +27,12 @@ RUN pip install --no-cache-dir -i "${PIP_INDEX_URL}" -r /app/requirements.txt \
 COPY scripts/ /app/scripts/
 COPY assets/  /app/assets/
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+
+# 显式设置权限（不要依赖 COPY 继承的 mode）。
+# 某些 NAS 的数据卷（如 fnOS 的 /vol1）用 ACL，文件的基础权限位可能是 000，
+# COPY 会把这个 000 原样带进镜像 → 文件在容器里"存在但不可读"
+# （典型症状：/bin/sh: 0: cannot open /app/entrypoint.sh: Permission denied）。
+RUN chmod -R a+rX /app && chmod 755 /app/entrypoint.sh
 
 # 非 root 运行；/data 用于录像等持久化
 RUN useradd -r -u 10001 -m hqcam && chown -R hqcam:hqcam /app

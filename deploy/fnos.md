@@ -109,6 +109,11 @@ docker compose logs -f          # Ctrl-C 退出日志
 > ```
 >
 > 构建完镜像名与 compose 里的一致，compose 会直接使用本地镜像，不再去拉。
+>
+> 注：fnOS 的 `/vol1` 是 **ACL 权限**（文件基础权限位为 `000`），
+> 早期版本的 Dockerfile 会让容器里的文件"存在但不可读"
+> （报错 `cannot open /app/entrypoint.sh: Permission denied`）。
+> 现在的 Dockerfile 已显式 `chmod`，不受影响；若你自行改过，请保留那行 `chmod`。
 
 ## 四、验证
 
