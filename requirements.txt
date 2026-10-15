@@ -1,0 +1,10 @@
+# 海雀摄像头本地化网关 · 运行依赖
+#
+# 实测版本（开发机 python 3.13）：av 19.0.1 / pycryptodome 3.24.1
+# PyAV 的 manylinux wheel 已内置 ffmpeg，无需系统 ffmpeg。
+
+av>=14,<20
+pycryptodome>=3.20
+
+# 可选：只有跑 `bridge`（Home Assistant MQTT 桥）角色时才需要
+paho-mqtt>=2.0

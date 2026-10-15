@@ -1,0 +1,26 @@
+# 构建上下文只应包含运行所需的最小文件集
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# 个人信息 / 抓包 / 逆向产物
+.env
+.env.*
+!.env.example
+config.json
+pcap/
+apk/
+analysis_*.txt
+*.mitm
+*.mitmproxy
+rec_ts/
+data/
+logs/
+*.log
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
