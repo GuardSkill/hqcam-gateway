@@ -93,6 +93,22 @@ docker compose logs -f          # Ctrl-C 退出日志
 > 想永久生效也可以给 Docker 加 `registry-mirrors`，但注意
 > **`registry-mirrors` 只对 Docker Hub 生效，不作用于 `ghcr.io`**，
 > 所以对 GHCR 只能改镜像名。
+>
+> ### 备选：干脆在 fnOS 上本地构建
+>
+> 如果镜像站也慢，直接用源码构建（fnOS 的 Docker Hub 加速是可用的，
+> 基础镜像 `python:3.12-slim` 实测 50 秒拉完）：
+>
+> ```bash
+> cd /vol1/1000
+> git clone https://github.com/<你的github用户名>/hqcam-gateway.git
+> cd hqcam-gateway
+> sudo docker build \
+>   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+>   -t ghcr.io/<你的github用户名>/hqcam-gateway:latest .
+> ```
+>
+> 构建完镜像名与 compose 里的一致，compose 会直接使用本地镜像，不再去拉。
 
 ## 四、验证
 

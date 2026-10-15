@@ -16,8 +16,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# 国内网络可换 PyPI 镜像：
+#   docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple .
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt \
+RUN pip install --no-cache-dir -i "${PIP_INDEX_URL}" -r /app/requirements.txt \
     && rm -rf /root/.cache/pip
 
 COPY scripts/ /app/scripts/
