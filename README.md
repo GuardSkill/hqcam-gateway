@@ -173,6 +173,17 @@ rest_command:
 
 ## 常见问题
 
+**拉镜像卡住 / 极慢（国内）？**
+fnOS 等国内 NAS 的 Docker 只给 Docker Hub 配了加速，**`ghcr.io` 是直连**，
+常卡在几十 KB/s 甚至不动。把 `.env` 的 `HQ_IMAGE` 换成国内 GHCR 镜像站即可：
+
+```dotenv
+HQ_IMAGE=ghcr.nju.edu.cn/<你的github用户名>/hqcam-gateway:latest
+```
+
+（其它可试：`ghcr.m.daocloud.io`、`ghcr.dockerproxy.com`。注意 `registry-mirrors`
+只对 Docker Hub 生效，管不到 `ghcr.io`，所以只能改镜像名。）
+
 **没有声音？**
 设备喇叭音量可能为 0。先设一次：
 

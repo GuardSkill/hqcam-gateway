@@ -73,6 +73,27 @@ docker compose logs -f          # Ctrl-C 退出日志
 首次启动要完成云端登录 + relay 握手，约 5–15 秒。看到类似
 `[*] HTTP 网关 http://0.0.0.0:8899/` 就成功了。
 
+> ### ⚠️ 国内网络：GHCR 直连很慢 / 卡死
+>
+> fnOS（以及多数国内 NAS）的 Docker 只给 **Docker Hub** 配了镜像加速，
+> **`ghcr.io` 是直连**，国内实测会卡在几十 KB 甚至完全不动。
+>
+> 解决办法：把 `.env` 里的镜像地址换成国内 GHCR 镜像站：
+>
+> ```dotenv
+> # 南京大学 GHCR 镜像（实测可用，首次拉取会自动回源缓存）
+> HQ_IMAGE=ghcr.nju.edu.cn/<你的github用户名>/hqcam-gateway:latest
+> ```
+>
+> 其它可尝试的镜像站（可用性随时间变化，自行替换域名即可）：
+> `ghcr.m.daocloud.io`、`ghcr.dockerproxy.com`。
+>
+> 换完再 `docker compose pull`。镜像内容与 `ghcr.io` 完全一致（按 digest 校验）。
+>
+> 想永久生效也可以给 Docker 加 `registry-mirrors`，但注意
+> **`registry-mirrors` 只对 Docker Hub 生效，不作用于 `ghcr.io`**，
+> 所以对 GHCR 只能改镜像名。
+
 ## 四、验证
 
 浏览器打开（`<TOKEN>` 换成你 `.env` 里的 HQ_TOKEN）：
