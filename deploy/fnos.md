@@ -196,7 +196,29 @@ docker compose logs -f hqcam-recorder
 > 每段独立可播，用 VLC / PotPlayer / HA 的 media 浏览器都能直接打开。
 > 清理完会顺手删掉空的日期目录；旧的平铺 `cam_*.ts` 也会被识别和清理。
 
-## 六、接 Home Assistant（可选）
+## 六、Web 控制台与「点图标直接进」
+
+浏览器打开 `http://<NAS_IP>:8899/` 就是控制台：实时预览、云台九宫格、音量滑块、
+音调测试、WAV 喊话、抓拍、听现场、运行状态。
+
+**关于 401 / 登录页**：设了 `HQ_TOKEN` 之后，未登录时打开页面会先看到登录页
+（而不是一段 401 文本），粘贴令牌即可。登录成功后服务端下发 Cookie，**记住一年**。
+
+所以从飞牛的 Docker 应用列表点「访问」图标：
+
+```
+第一次  → 登录页，粘贴一次 HQ_TOKEN
+之后    → 直接进控制台，不再需要任何输入
+```
+
+> 想连第一次都不输：在飞牛里新建一个自定义快捷方式/书签，URL 填
+> `http://<NAS_IP>:8899/?token=<TOKEN>`。用带令牌的 URL 打开过一次后，
+> Cookie 就种下了，以后裸地址也能进。
+
+> ⚠️ 浏览器只在 **HTTPS 或 localhost** 下允许网页调用麦克风，所以控制台里的对讲是
+> 「上传 WAV 喊话」+「音调测试」，不是实时麦克风。要用实时麦克风请走 App / 自建 HTTPS 反代。
+
+## 七、接 Home Assistant（可选）
 
 前提：HA 里已配好 MQTT broker。
 
@@ -207,7 +229,7 @@ docker compose --profile bridge up -d
 
 HA 会自动发现 `camera.hqcam`、`button.hqcam_ptz_*` 等实体。
 
-## 七、常用运维
+## 八、常用运维
 
 ```bash
 cd ~/hqcam
@@ -231,7 +253,9 @@ docker compose pull && docker compose up -d   # 升级镜像
 | 日志报「缺少必填配置」 | `.env` 里 4 个必填项没填全 |
 | 登录失败 / 拿不到 token | 账号密码错，或 `HQ_APPDID` 与该账号不匹配 |
 | 有画面没声音 | `curl ".../vol?v=100&token=<TOKEN>"` 先把喇叭音量设上去 |
-| 一直 401 | 已设 `HQ_TOKEN` 但请求没带令牌，URL 加 `?token=<TOKEN>` |
+| 一直 401 | 已设 `HQ_TOKEN` 但没带令牌：浏览器打开 `/login` 输一次，或 URL 加 `?token=<TOKEN>` |
+| 登录页输入令牌还是 401 | 检查 `.env` 的 `HQ_TOKEN` 是否改过但没重建容器（改 env 要 `up -d --force-recreate`） |
+| 预览一直是黑的 | MJPEG 需要摄像头出帧；看 `docker compose logs -f` 里 `[snap]` 有无解码报错（缺 Pillow 会这样） |
 | 端口被占 | `.env` 里改 `HQ_HTTP_PORT` |
 | fnOS 重启后容器没起 | 已设 `restart: unless-stopped`；确认 Docker 服务随系统启动 |
 

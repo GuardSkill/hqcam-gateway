@@ -22,6 +22,29 @@
 | 通用 RPC | 明文 RPC 直通 + 自动解密设备响应 |
 | 录像 | 可选角色，按 TS 包边界分段落盘，带保留策略 |
 | HA 桥 | 可选角色，MQTT 自动发现生成实体 |
+| **Web 控制台** | 浏览器直接看画面、控云台、调音量、喊话（内置登录页，无需拼 token） |
+
+## Web 控制台
+
+浏览器打开 `http://<IP>:8899/` 就是一个控制台，不用记接口：
+
+* **实时预览**：MJPEG 2fps（浏览器不支持 HEVC-in-TS，所以预览走 MJPEG）
+* **云台**：九宫格方向键 + 步长（200ms / 500ms / 1.2s）
+* **音量**：滑块读写设备喇叭音量（喊话前建议 ≥ 80）
+* **对讲**：音调测试 + 上传 WAV 喊话
+* **抓拍 / 听现场 / 运行状态**：一键下载快照、拉音频流、看帧数与重连次数
+
+### 登录（不用再往 URL 里拼 token）
+
+打开页面时如果没带令牌，会先看到**登录页**，粘贴一次 `HQ_TOKEN` 即可：
+
+* 登录成功后服务端下发 `HttpOnly; SameSite=Lax` 的 Cookie，**有效期一年**
+* 所以从飞牛 / 群晖的 Docker 图标点进来，**只需第一次输令牌**，之后直接进控制台
+* 用 `?token=<TOKEN>` 打开过一次页面，也会自动种下 Cookie
+* 右上角「退出」清 Cookie
+
+> 想彻底免输入：在飞牛里给容器加一个自定义快捷链接，URL 填
+> `http://<NAS_IP>:8899/?token=<TOKEN>`（第一次访问会顺手种 Cookie，之后不带 token 也能进）。
 
 ## 访问令牌（★ 强烈建议开启）
 
@@ -33,22 +56,26 @@
 python -c "import secrets;print(secrets.token_urlsafe(24))"
 ```
 
-然后写进 `.env`：`HQ_TOKEN=你生成的令牌`。三种携带方式都认：
+然后写进 `.env`：`HQ_TOKEN=你生成的令牌`。四种携带方式都认：
 
 | 方式 | 例子 |
 | --- | --- |
+| 浏览器登录 | 打开 `http://<IP>:8899/` → 输入令牌（推荐） |
 | URL 查询参数 | `http://<IP>:8899/av.ts?token=<TOKEN>` |
 | 请求头 | `Authorization: Bearer <TOKEN>` |
 | 请求头 | `X-Token: <TOKEN>` |
+| Cookie | 登录后自动携带 `hq_token` |
 
-- 打开状态页：`http://<IP>:8899/?token=<TOKEN>`（页面内所有链接会自动带上令牌）
 - 录像器 / MQTT 桥容器也会读取 `HQ_TOKEN` 自动附加，无需额外配置
 - **留空 = 不鉴权**，仅适合完全可信的内网
 
 ## HTTP 接口
 
 ```
-GET  /                     状态页
+GET  /                     ★ Web 控制台（未登录时显示登录页）
+GET  /login                登录页（POST 提交 token）
+GET  /logout               清除登录 Cookie
+GET  /mjpeg?w=960&fps=2    预览用 MJPEG 流
 GET  /status.json          JSON 状态
 GET  /live.hevc            原始 HEVC Annex-B
 GET  /live.ts              MPEG-TS（仅视频）

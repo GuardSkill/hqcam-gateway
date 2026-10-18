@@ -47,11 +47,19 @@ from cloud_api import Api, DEVICE
 from relayinit_build import enc_field, enc_var
 from hq_config import cfg
 import relay_stream as RS
+import webui
 
 SUF = b'DaNalEsZX'
 
 # ★ HTTP 访问令牌（来自 HQ_TOKEN）。留空 = 不鉴权（仅限可信内网）。
 ACCESS_TOKEN = cfg.token or ''
+# 登录失败计数（只用于递增延时，防脚本爆破；成功即清零）
+LOGIN_FAIL = {'n': 0}
+
+
+def render_login(err=''):
+    return webui.LOGIN_HTML.replace('{{ERR}}', err)
+
 KEEPALIVE = struct.pack('>I', 5) + b'.'
 PAY_STARTVIDEO = bytes.fromhex('08011001204b3000')   # ch_no=1 client_type=1 quality=75 vstrm=0
 
@@ -162,8 +170,8 @@ def rx_log(who, body):
 
 
 AHUB = Hub()          # 音频订阅中心（第二条 relay 连接，tag=0x2000）
-SNAP = {'jpg': None, 'ts': 0, 'want': threading.Event(), 'lock': threading.Lock(),
-        'err': None}
+SNAP = {'jpg': None, 'small': None, 'ts': 0, 'want': threading.Event(),
+        'lock': threading.Lock(), 'err': None}
 
 
 def alaw2lin(a):
@@ -446,8 +454,21 @@ class Source(threading.Thread):
                 img = fr.to_image()
                 b = io.BytesIO()
                 img.save(b, 'JPEG', quality=82)
+                full = b.getvalue()
+                # 缩略图：给 /mjpeg 预览用（3K 原图直接推 MJPEG 太吃带宽）
+                small = full
+                try:
+                    w = 960
+                    im2 = img.resize((w, int(img.height * w / img.width))) \
+                        if img.width > w else img
+                    b2 = io.BytesIO()
+                    im2.save(b2, 'JPEG', quality=75)
+                    small = b2.getvalue()
+                except Exception:
+                    pass
                 with SNAP['lock']:
-                    SNAP['jpg'] = b.getvalue()
+                    SNAP['jpg'] = full
+                    SNAP['small'] = small
                     SNAP['ts'] = time.time()
                 SNAP['want'].clear()
                 return True
@@ -961,17 +982,28 @@ class H(BaseHTTPRequestHandler):
         self.send_header('Content-Type', ct)
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Connection', 'close')
+        # 用 ?token= 访问过页面时，顺手把令牌种进 Cookie，之后从图标进来就不用带令牌
+        if getattr(self, '_ck_pending', False) and ACCESS_TOKEN:
+            self.send_header('Set-Cookie', self._cookie_hdr())
+            self._ck_pending = False
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
 
     # ---- 访问令牌（HQ_TOKEN）------------------------------------------------
+    def _cookie_hdr(self):
+        return ('hq_token=%s; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax'
+                % ACCESS_TOKEN)
+
+    def _tok_from_q(self, q):
+        v = (q.get('token') or [None])[0]
+        return v if v and v == ACCESS_TOKEN else None
+
     def _tok_ok(self, q):
         """校验访问令牌。未配置令牌时一律放行（仅限可信内网）。"""
         if not ACCESS_TOKEN:
             return True
-        v = (q.get('token') or [None])[0]
-        if v and v == ACCESS_TOKEN:
+        if self._tok_from_q(q):
             return True
         auth = (self.headers.get('Authorization') or '').strip()
         if auth[:7].lower() == 'bearer ' and auth[7:].strip() == ACCESS_TOKEN:
@@ -987,10 +1019,35 @@ class H(BaseHTTPRequestHandler):
                     return True
         return False
 
+    def _wants_html(self):
+        """浏览器在要「页面」而不是图片/流/API？"""
+        if 'text/html' in (self.headers.get('Accept') or ''):
+            return True
+        return urlparse(self.path).path in ('/', '/index.html', '/login')
+
     def _deny(self):
+        """未授权。
+
+        浏览器打开页面 → 直接给**登录页**（否则飞牛图标点进来只会看到一段 401 文本）；
+        图片/流/API 请求 → 保持 401 文本，别往 <img> 里塞 HTML。
+        """
+        if self._wants_html():
+            b = render_login('').encode()
+            self.send_response(401)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(b)))
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            try:
+                self.wfile.write(b)
+            except Exception:
+                pass
+            return
         b = ('访问被拒：缺少或错误的访问令牌 (401)\n'
              '  方式一：URL 加 ?token=<TOKEN>\n'
              '  方式二：请求头 Authorization: Bearer <TOKEN> 或 X-Token: <TOKEN>\n'
+             '  方式三：浏览器访问 /login 输入令牌（会记住一年）\n'
              '  令牌由部署时的环境变量 HQ_TOKEN 决定。\n').encode('utf-8')
         self.send_response(401)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
@@ -1003,12 +1060,73 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    # ---- 登录 / 登出 ----
+    def _html(self, code, body, extra=None):
+        b = body.encode()
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(b)))
+        self.send_header('Connection', 'close')
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        try:
+            self.wfile.write(b)
+        except Exception:
+            pass
+
+    def _redirect(self, to, extra=None):
+        self.send_response(303)
+        self.send_header('Location', to)
+        self.send_header('Content-Length', '0')
+        self.send_header('Connection', 'close')
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+
+    def serve_login_get(self, q):
+        # 令牌没启用、或已经带着正确令牌 → 不用登录
+        if not ACCESS_TOKEN or self._tok_ok(q):
+            return self._redirect('/')
+        self._html(200, render_login(''))
+
+    def serve_login_post(self):
+        n = int(self.headers.get('Content-Length') or 0)
+        body = self.rfile.read(n) if n else b''
+        tok = ''
+        if 'application/x-www-form-urlencoded' in (self.headers.get('Content-Type') or ''):
+            f = parse_qs(body.decode('utf-8', 'ignore'))
+            tok = (f.get('token') or [''])[0]
+        else:
+            tok = body.decode('utf-8', 'ignore').strip()
+        if ACCESS_TOKEN and tok == ACCESS_TOKEN:
+            LOGIN_FAIL['n'] = 0
+            return self._redirect('/', {'Set-Cookie': self._cookie_hdr()})
+        # 失败：轻微递增延时，够挡住脚本爆破，又不影响手输
+        LOGIN_FAIL['n'] = min(LOGIN_FAIL['n'] + 1, 30)
+        time.sleep(min(2.0, 0.3 + LOGIN_FAIL['n'] * 0.15))
+        print('[login] 令牌错误（连续第 %d 次）来自 %s' % (LOGIN_FAIL['n'],
+                                                          self.client_address[0]), flush=True)
+        self._html(401, render_login('令牌不正确'))
+
+    def serve_logout(self):
+        self._redirect('/login', {
+            'Set-Cookie': 'hq_token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax'})
+
     def do_GET(self):
         u = urlparse(self.path)
         p = u.path
         q = parse_qs(u.query)
+        # 登录端点必须在令牌校验之前（否则永远进不去）
+        if p == '/login':
+            return self.serve_login_get(q)
+        if p == '/logout':
+            return self.serve_logout()
         if not self._tok_ok(q):
             return self._deny()
+        if ACCESS_TOKEN and self._tok_from_q(q):
+            self._ck_pending = True
         try:
             if p in ('/', '/index.html'):
                 self.serve_page()
@@ -1020,6 +1138,8 @@ class H(BaseHTTPRequestHandler):
                 self.serve_ts()
             elif p == '/av.ts':
                 self.serve_av_ts()
+            elif p == '/mjpeg':
+                self.serve_mjpeg(q)
             elif p == '/audio.wav':
                 self.serve_audio_wav()
             elif p == '/audio.alaw':
@@ -1047,6 +1167,8 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         p = u.path
         q = parse_qs(u.query)
+        if p == '/login':
+            return self.serve_login_post()
         if not self._tok_ok(q):
             return self._deny()
         try:
@@ -1065,87 +1187,11 @@ class H(BaseHTTPRequestHandler):
 
     # ---- 页面 ----
     def serve_page(self):
-        s = HUB.stats
-        up = time.time() - s['start']
-        html = ('<html><head><meta charset="utf-8"><title>海雀摄像头 · 本地网关</title>'
-                '<style>body{font-family:system-ui;background:#111;color:#eee;margin:2em}'
-                'a{color:#6cf;margin-right:1em}h1{font-size:1.4em}'
-                'table{border-collapse:collapse}td,th{padding:4px 12px;border:1px solid #444}'
-                '</style></head><body><h1>海雀摄像头 · 本地化直播网关（去云）</h1>'
-                '<p>状态 <b>%s</b> · 运行 %.0fs · 媒体帧 %d · HEVC AU %d · 接收 %.1f MB · 重连 %d</p>'
-                '<p>relay = %s<br>security_key = %s</p>'
-                '<p><a href="/av.ts">/av.ts</a><a href="/live.ts">/live.ts</a>'
-                '<a href="/live.hevc">/live.hevc</a>'
-                '<a href="/audio.wav">/audio.wav</a><a href="/audio.alaw">/audio.alaw</a>'
-                '<a href="/snapshot.jpg">/snapshot.jpg</a><a href="/status.json">/status.json</a></p>'
-                '<p>音频 状态 <b>%s</b> · %d 帧 · %.1f MB · A-law 16kHz · 对讲已发 %d 帧</p>'
-                '<h3>★ 音量（对讲不出声的根因，2026-10-15 定位）</h3>'
-                '<p>设备喇叭音量由 <code>GetDeviceVol</code>/<code>SetDeviceVol</code> 控制；'
-                '出厂/被 App 调过之后音量可能是 <b>0（静音）</b>，此时 StartTalkback 成功、'
-                '上行帧也正确，但喇叭一声不出。所有 /talk* 端点现在会先确保音量 ≥ %d。</p>'
-                '<p><a href="/vol">读音量</a>'
-                '<a href="/vol?v=100">设为 100</a>'
-                '<a href="/vol?v=80">设为 80</a>'
-                '<a href="/vol?v=50">设为 50</a>'
-                '<a href="/rpc?method=GetWaringToneStatus&payload=0800&via=asrc">警告音状态</a></p>'
-                '<h3>对讲（上行）</h3>'
-                '<p>设备 ACK 后发 320B/20ms A-law 帧（50 帧/秒，与 App 逐字节一致）。'
-                '各连接模式：<b>auto</b>（默认，= App 布局）/ asrc / both / mix / src<br>'
-                '注意：RPC 的 <code>f7=20145</code> 表示 <b>payload 非法/缺失</b>，'
-                '例如 <code>StartTalkback</code> 必须带 <code>0800</code>，空 payload 会被拒。</p>'
-                '<p><a href="/talk/tone?hz=1000&ms=1500&via=auto&vol=100">1kHz 1.5s (vol=100)</a>'
-                '<a href="/talk/tone?hz=600&ms=3000&via=auto&vol=100">600Hz 3s</a>'
-                '<a href="/talk/tone?hz=1500&ms=800&via=auto&vol=100">1.5kHz 0.8s</a>'
-                '<a href="/talk/tone?hz=1000&ms=1500&via=both&vol=100">via=both</a>'
-                '<a href="/talk/tone?hz=1000&ms=1500&via=mix&vol=100">via=mix</a>'
-                '<a href="/talk/tone?hz=1000&ms=1500&via=src&vol=100">via=src</a></p>'
-                '<p><b>半双工变体</b>（先 StopAudio 释放音频通道 → 对讲 → 收尾 StartAudio）：'
-                '<a href="/talk/tone?hz=1000&ms=2000&via=asrc&pre_stopaudio=1&post_startaudio=1&vol=100">'
-                'asrc+StopAudio</a>'
-                '<a href="/talk/tone?hz=1000&ms=2000&via=auto&pre_stopaudio=1&post_startaudio=1&vol=100">'
-                'auto+StopAudio</a></p>'
-                '<p><b>加密模式变体</b>（固件 danavideo_decrypt_av_data 的 encrypt_flag 分支）：'
-                '<a href="/talk/tone?hz=1000&ms=2000&via=asrc&mode=dk&vol=100">flag=1 会话dk直解</a>'
-                '<a href="/talk/tone?hz=1000&ms=2000&via=asrc&mode=plain&vol=100">flag=0 明文</a>'
-                '<a href="/talk/tone?hz=1000&ms=2000&via=asrc&mode=dk&pre_stopaudio=1&vol=100">'
-                'flag=1 + StopAudio</a></p>'
-                '<p><b>RPC 诊断</b>（设备对已识别方法必回一条加密响应，其方法名可回显）：'
-                '<a href="/rpc?method=StartTalkback&payload=0800&via=asrc">StartTalkback</a>'
-                '<a href="/rpc?method=StopTalkback&payload=0800&via=asrc">StopTalkback</a>'
-                '<a href="/rpc?method=GetDeviceVol&payload=0800&via=asrc">GetDeviceVol</a>'
-                '<a href="/rpc?method=BogusMethodXyz&payload=0800&via=asrc">伪造方法(应无响应)</a></p>'
-                '<p>发 WAV: <code>curl -X POST --data-binary @a.wav "http://%s/talk.wav?via=auto&vol=100"</code></p>'
-                '<h3>云台</h3>'
-                '<p>' + ''.join('<a href="/ptz?dir=%s&ms=400">%s</a>' % (d, d)
-                                for d in ['up', 'down', 'left', 'right', 'stop',
-                                          'upleft', 'upright', 'downleft', 'downright']) + '</p>'
-                '<h3>状态表</h3><table><tr><th>项</th><th>值</th></tr>'
-                '<tr><td>分辨率</td><td>2880x1620 (3K HEVC)</td></tr>'
-                '<tr><td>设备</td><td>%s</td></tr>'
-                '<tr><td>网关</td><td>%s</td></tr></table></body></html>'
-                ) % (SRC.state, up, s['frames'], s['au'], s['bytes'] / 1048576,
-                     s['reconnects'], s['relay'], s['sk'],
-                     ASRC.state, AHUB.stats['frames'], AHUB.stats['bytes'] / 1048576,
-                     AHUB.stats.get('talk_frames', 0),
-                     DEFAULT_TALK_VOL,
-                     self.headers.get('Host'), DEVICE, self.headers.get('Host'))
-        # 鉴权开启时，把令牌注入页面内所有链接，便于直接点击
-        if ACCESS_TOKEN:
-            from urllib.parse import quote as _quote
-            _t = _quote(ACCESS_TOKEN, safe='')
-
-            def _inj(m):
-                _u = m.group(1)
-                _sep = '&' if '?' in _u else '?'
-                return 'href="%s%stoken=%s"' % (_u, _sep, _t)
-            html = re.sub(r'href="(/[^"]*)"', _inj, html)
-            html = html.replace(
-                '<h1>海雀摄像头 · 本地化直播网关（去云）</h1>',
-                '<h1>海雀摄像头 · 本地化直播网关（去云）</h1>'
-                '<p style="color:#6f6">🔒 访问令牌已启用（HQ_TOKEN）</p>')
-        b = html.encode()
+        """控制台（预览 / 云台 / 音量 / 对讲 / 状态）。页面本体在 webui.py。"""
+        b = webui.APP_HTML.encode()
         self._hdr('text/html; charset=utf-8', {'Content-Length': str(len(b))})
         self.wfile.write(b)
+
 
     def serve_status(self):
         s = dict(HUB.stats)
@@ -1318,6 +1364,52 @@ class H(BaseHTTPRequestHandler):
                 return
             time.sleep(0.2)
         self.send_error(503, 'no snapshot yet' + (' (%s)' % SNAP['err'] if SNAP.get('err') else ''))
+
+    def serve_mjpeg(self, q):
+        """MJPEG 预览流（multipart/x-mixed-replace，浏览器 <img> 原生支持）。
+
+        为什么不用 /av.ts 做预览：浏览器基本不支持 HEVC-in-TS，画面会黑屏。
+        MJPEG 用的是解码后的缩略图（宽 960），2fps 在 NAS 上 CPU 占用很低。
+        """
+        try:
+            fps = float((q.get('fps') or ['2'])[0])
+        except ValueError:
+            fps = 2.0
+        fps = max(0.5, min(10.0, fps))
+        try:
+            w = int((q.get('w') or ['960'])[0])
+        except ValueError:
+            w = 960
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        last = 0.0
+        try:
+            while True:
+                SNAP['want'].set()
+                t0 = time.time()
+                got = None
+                while time.time() - t0 < 5:
+                    with SNAP['lock']:
+                        j = SNAP['small'] if w <= 1280 else SNAP['jpg']
+                        ts = SNAP['ts']
+                    if j and ts > last:
+                        got, last = j, ts
+                        break
+                    time.sleep(0.05)
+                if got is None:
+                    time.sleep(0.5)
+                    continue
+                self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\n'
+                                 b'Content-Length: ' + str(len(got)).encode() + b'\r\n\r\n')
+                self.wfile.write(got)
+                self.wfile.write(b'\r\n')
+                self.wfile.flush()
+                time.sleep(max(0.0, 1.0 / fps - (time.time() - t0)))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     # ---- 对讲上行 ----
     def serve_talk(self, body, kind, q=None):
