@@ -160,10 +160,10 @@ docker compose --profile bridge up -d
 | `HQ_REC_SEG` | 每段秒数 | `300` |
 | `HQ_REC_UID` / `HQ_REC_GID` | 录像文件属主（必须和宿主目录一致） | fnOS：`1000:1001` |
 
-**空间估算**（实测 3K HEVC ≈ 125 KB/s）：
+**空间估算**（实测 3K HEVC ≈ 230 KB/s，300s 一段约 67 MB）：
 
 ```
-1 小时 ≈ 440 MB     1 天 ≈ 10.5 GB     3 天 ≈ 31 GB
+1 小时 ≈ 800 MB     1 天 ≈ 19 GB     3 天 ≈ 57 GB
 ```
 
 **注意**：清理是在**录制过程中**周期性执行的（`HQ_REC_CLEANUP_EVERY`，默认 300 秒），
