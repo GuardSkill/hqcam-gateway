@@ -162,7 +162,8 @@ def rx_log(who, body):
 
 
 AHUB = Hub()          # 音频订阅中心（第二条 relay 连接，tag=0x2000）
-SNAP = {'jpg': None, 'ts': 0, 'want': threading.Event(), 'lock': threading.Lock()}
+SNAP = {'jpg': None, 'ts': 0, 'want': threading.Event(), 'lock': threading.Lock(),
+        'err': None}
 
 
 def alaw2lin(a):
@@ -450,7 +451,11 @@ class Source(threading.Thread):
                     SNAP['ts'] = time.time()
                 SNAP['want'].clear()
                 return True
-        except Exception:
+        except Exception as e:
+            # 不再静默吞掉：首次失败打日志，并把错误暴露给 /snapshot.jpg
+            if SNAP.get('err') != repr(e):
+                SNAP['err'] = repr(e)
+                print('[snap] 解码/编码失败: %r' % (e,), flush=True)
             return False
         return False
 
@@ -1312,7 +1317,7 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(j)
                 return
             time.sleep(0.2)
-        self.send_error(503, 'no snapshot yet')
+        self.send_error(503, 'no snapshot yet' + (' (%s)' % SNAP['err'] if SNAP.get('err') else ''))
 
     # ---- 对讲上行 ----
     def serve_talk(self, body, kind, q=None):

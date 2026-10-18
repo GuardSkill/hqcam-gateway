@@ -6,5 +6,8 @@
 av>=14,<20
 pycryptodome>=3.20
 
+# 快照（/snapshot.jpg）需要：PyAV 的 frame.to_image() 依赖 Pillow 把 YUV 转 RGB 再存 JPEG
+Pillow>=10
+
 # 可选：只有跑 `bridge`（Home Assistant MQTT 桥）角色时才需要
 paho-mqtt>=2.0
