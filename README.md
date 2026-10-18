@@ -196,6 +196,15 @@ curl "http://<网关IP>:8899/talk/tone?hz=1000&ms=3000&vol=100&token=<TOKEN>"
 说明设置了 `HQ_TOKEN` 但请求没带令牌。在 URL 加 `?token=<TOKEN>`，
 或加请求头 `Authorization: Bearer <TOKEN>`。
 
+**`/snapshot.jpg` 返回 503？**
+镜像是旧版（缺 Pillow）。503 响应体会带上真实原因，例如
+`no snapshot yet (ImportError("No module named 'PIL'"))`。
+拉最新镜像或本地重建即可：
+
+```bash
+sudo docker build -t ghcr.io/<你的github用户名>/hqcam-gateway:latest .
+```
+
 **容器起来了但一直 unhealthy？**
 首次启动需要完成云端登录 + relay 握手，约 5–15 秒；`start_period` 已给到 25 秒。
 若持续不健康，看日志：`docker compose logs -f hqcam-gateway`。
