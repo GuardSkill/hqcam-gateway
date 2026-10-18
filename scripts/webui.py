@@ -155,9 +155,9 @@ color:var(--fg);font-size:13px;cursor:pointer;font-family:inherit;transition:bac
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btns{display:flex;flex-wrap:wrap;gap:8px}
 .file{display:none}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;font-size:12.5px}
+.kv{display:grid;grid-template-columns:88px 1fr;gap:7px 12px;font-size:12.5px}
 .kv dt{color:var(--dim)}
-.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.kv dd{margin:0;font-variant-numeric:tabular-nums}
 .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;
 background:rgba(61,220,132,.13);color:var(--ok)}
 .tag.warn{background:rgba(255,176,32,.13);color:var(--warn)}
