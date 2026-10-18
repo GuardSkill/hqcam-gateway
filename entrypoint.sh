@@ -34,6 +34,8 @@ case "$ROLE" in
       --seg "${HQ_REC_SEG:-300}" \
       --keep-days "${HQ_REC_KEEP_DAYS:-0}" \
       --keep-gb "${HQ_REC_KEEP_GB:-0}" \
+      --min-free-gb "${HQ_REC_MIN_FREE_GB:-0}" \
+      --cleanup-every "${HQ_REC_CLEANUP_EVERY:-300}" \
       ${HQ_REC_MKV:+--mkv}
     ;;
 

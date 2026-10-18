@@ -16,11 +16,8 @@ fnOS 自带 Docker / Docker Compose，部署就是「放两个文件 + 一条命
 mkdir -p ~/hqcam && cd ~/hqcam
 ```
 
-> 如果后面要用**录像**角色，先建好数据目录并放开权限（容器内以 UID 10001 非 root 运行）：
-> ```bash
-> mkdir -p ~/hqcam/data/rec
-> sudo chown -R 10001:10001 ~/hqcam/data
-> ```
+> 后面要用**录像**角色时，录像目录的属主必须和 `.env` 里的 `HQ_REC_UID:HQ_REC_GID` 一致
+> （fnOS 的 `/vol*/1000` 是 `1000:1001`，compose 已按此默认）。详见第五节。
 
 ## 二、放两个文件
 
@@ -55,10 +52,14 @@ HQ_TOKEN=你生成的随机令牌
 # 镜像地址改成你自己的 GHCR 路径
 HQ_IMAGE=ghcr.io/你的github用户名/hqcam-gateway:latest
 
-# 可选：录像
+# 可选：录像（详见第五节）
+HQ_REC_HOST_DIR=/vol2/1000/hqcam-rec
+HQ_REC_UID=1000
+HQ_REC_GID=1001
 HQ_REC_SEG=300
-HQ_REC_KEEP_DAYS=7
-HQ_REC_KEEP_GB=200
+HQ_REC_KEEP_DAYS=3
+HQ_REC_KEEP_GB=0
+HQ_REC_MIN_FREE_GB=10
 ```
 
 ## 三、拉镜像并启动
@@ -141,15 +142,54 @@ curl "http://<fnOS_IP>:8899/ptz?dir=left&ms=500&token=<TOKEN>"
 
 接入 Home Assistant / Frigate 用 `http://<fnOS_IP>:8899/av.ts?token=<TOKEN>`。
 
-## 五、开录像（可选）
+## 五、开录像（可选，3 天滚动）
+
+**先选好落盘位置。** fnOS 通常有两块盘，录像建议放大的那块：
 
 ```bash
-docker compose --profile recorder up -d
-ls -lh ~/hqcam/data/rec        # 分段 .ts 文件
+df -h | grep -E "/vol[0-9]"
+# 例：/vol1 剩 22G（系统盘），/vol2 剩 3.6T（数据盘）→ 放 /vol2
 ```
 
-录像落盘在 `~/hqcam/data/rec`，保留策略由 `.env` 的
-`HQ_REC_KEEP_DAYS` / `HQ_REC_KEEP_GB` 控制。
+在 `.env` 里指定位置与保留策略：
+
+```dotenv
+# 录像落盘目录（宿主路径，可以指向任意盘）
+HQ_REC_HOST_DIR=/vol2/1000/hqcam-rec
+
+# 文件属主必须和该目录一致，否则容器写不进去
+#   stat -c "%u:%g" /vol2/1000   →  1000:1001
+HQ_REC_UID=1000
+HQ_REC_GID=1001
+
+# 每段 5 分钟
+HQ_REC_SEG=300
+
+# 滚动保留：3 天 / 容量上限 / 磁盘底线，三道保险
+HQ_REC_KEEP_DAYS=3
+HQ_REC_KEEP_GB=0
+HQ_REC_MIN_FREE_GB=10
+```
+
+建目录并启动：
+
+```bash
+mkdir -p /vol2/1000/hqcam-rec
+docker compose --profile recorder up -d
+docker compose logs -f hqcam-recorder
+```
+
+日志会打印落盘路径、保留策略和当前磁盘可用空间；每 5 分钟清理一次，
+形如 `[清理] 删除 1 个旧片段，释放 4.2GB；现存 864 段 / 31.0GB，磁盘可用 3.5TB`。
+
+**空间估算**（实测 3K HEVC ≈ 125 KB/s）：
+
+```
+1 小时 ≈ 440 MB     1 天 ≈ 10.5 GB     3 天 ≈ 31 GB
+```
+
+> 录像目录里是 `cam_YYYYMMDD_HHMMSS.ts`，每段独立可播，
+> 用 VLC / PotPlayer / HA 的 media 浏览器都能直接打开。
 
 ## 六、接 Home Assistant（可选）
 

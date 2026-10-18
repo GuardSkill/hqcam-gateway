@@ -44,35 +44,104 @@ def human(n):
     return '%.1fPB' % n
 
 
-def cleanup(outdir, keep_days=0, keep_gb=0, exts=('ts', 'mkv')):
+def disk_free_gb(path):
+    """目标目录所在文件系统的可用空间（GB）；取不到返回 -1"""
+    try:
+        st = os.statvfs(path)
+        return st.f_bavail * st.f_frsize / 1024.0 ** 3
+    except Exception:
+        try:
+            import shutil
+            return shutil.disk_usage(path).free / 1024.0 ** 3
+        except Exception:
+            return -1.0
+
+
+def dir_files(outdir, exts=('ts', 'mkv')):
     files = []
     for e in exts:
         files += glob.glob(os.path.join(outdir, 'cam_*.%s' % e))
+    return files
+
+
+def dir_bytes(outdir, exts=('ts', 'mkv')):
+    tot = 0
+    for p in dir_files(outdir, exts):
+        try:
+            tot += os.path.getsize(p)
+        except OSError:
+            pass
+    return tot
+
+
+def cleanup(outdir, keep_days=0, keep_gb=0, min_free_gb=0, protect=None,
+            exts=('ts', 'mkv')):
+    """滚动清理：① 超天数 ② 超容量 ③ 磁盘剩余不足。
+    三道保险任意一道触发就删最旧的；protect = 正在写的片段，永不删。"""
+    files = dir_files(outdir, exts)
+    if protect:
+        ap = os.path.abspath(protect)
+        files = [p for p in files if os.path.abspath(p) != ap]
     files.sort(key=lambda p: os.path.getmtime(p))
+
     removed = []
+
+    # ① 超过保留天数
     if keep_days > 0:
         cutoff = time.time() - keep_days * 86400
-        for p in list(files):
-            if os.path.getmtime(p) < cutoff:
+        keep = []
+        for p in files:
+            try:
+                mt = os.path.getmtime(p)
+            except OSError:
+                continue
+            if mt < cutoff:
                 removed.append(p)
-                files.remove(p)
+            else:
+                keep.append(p)
+        files = keep
+
+    def sz(p):
+        try:
+            return os.path.getsize(p)
+        except OSError:
+            return 0
+
+    # ② 超过总容量上限
     if keep_gb > 0:
-        total = sum(os.path.getsize(p) for p in files)
+        total = sum(sz(p) for p in files)
         limit = keep_gb * 1024 ** 3
         i = 0
         while total > limit and i < len(files):
+            total -= sz(files[i])
             removed.append(files[i])
-            total -= os.path.getsize(files[i])
             i += 1
+        files = files[i:]
+
+    # ③ 磁盘剩余空间低于底线（最后一道保险）
+    if min_free_gb > 0:
+        free = disk_free_gb(outdir)
+        i = 0
+        while free >= 0 and free < min_free_gb and i < len(files):
+            free += sz(files[i]) / 1024.0 ** 3
+            removed.append(files[i])
+            i += 1
+        files = files[i:]
+
     freed = 0
+    n = 0
     for p in removed:
         try:
-            freed += os.path.getsize(p)
+            freed += sz(p)
             os.remove(p)
+            n += 1
         except Exception as e:
             print('   删除失败 %s %r' % (p, e))
-    if removed:
-        print('  [清理] 删除 %d 个旧片段，释放 %s' % (len(removed), human(freed)))
+    if n:
+        print('  [清理] 删除 %d 个旧片段，释放 %s；现存 %d 段 / %s，磁盘可用 %.1f GB'
+              % (n, human(freed), len(dir_files(outdir, exts)),
+                 human(dir_bytes(outdir, exts)), disk_free_gb(outdir)))
+    return n, freed
 
 
 def remux_ts_to_mkv(ts_path, fps=25):
@@ -109,6 +178,16 @@ def remux_ts_to_mkv(ts_path, fps=25):
         return None
 
 
+def uniq_name(outdir):
+    base = time.strftime('%Y%m%d_%H%M%S')
+    p = os.path.join(outdir, 'cam_%s.ts' % base)
+    k = 1
+    while os.path.exists(p):
+        p = os.path.join(outdir, 'cam_%s_%d.ts' % (base, k))
+        k += 1
+    return p
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--url', default='http://127.0.0.1:8899/av.ts')
@@ -116,25 +195,48 @@ def main():
     ap.add_argument('--seg', type=int, default=300, help='每段秒数')
     ap.add_argument('--keep-days', type=float, default=0, help='最多保留天数 (0=不限)')
     ap.add_argument('--keep-gb', type=float, default=0, help='最多占用 GB (0=不限)')
+    ap.add_argument('--min-free-gb', type=float, default=0,
+                    help='磁盘可用低于该值时强制删最旧片段 (0=关闭)')
     ap.add_argument('--mkv', action='store_true', help='收段后转成 .mkv')
-    ap.add_argument('--cleanup-every', type=int, default=600)
+    ap.add_argument('--cleanup-every', type=int, default=300,
+                    help='清理间隔秒数（录制过程中也会执行）')
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
+
+    # 启动先清理一次（容器重启后立刻恢复滚动状态）
+    cleanup(a.out, a.keep_days, a.keep_gb, a.min_free_gb)
+
     print('[*] 录像器启动')
     print('    拉流: %s' % a.url)
     print('    落盘: %s' % os.path.abspath(a.out))
-    print('    分段: %ds   保留: %s天 / %sGB   转MKV: %s'
-          % (a.seg, a.keep_days or '∞', a.keep_gb or '∞', '是' if a.mkv else '否'))
+    print('    分段: %ds' % a.seg)
+    print('    保留: %s 天 / %s GB / 可用低于 %s GB 时强删'
+          % (a.keep_days or '∞', a.keep_gb or '∞', a.min_free_gb or '关'))
+    print('    当前: %d 段 / %s，磁盘可用 %.1f GB'
+          % (len(dir_files(a.out)), human(dir_bytes(a.out)), disk_free_gb(a.out)))
 
     nseg = 0
     nbytes = 0
     last_clean = time.time()
+    active = None
+
+    def maybe_clean(force=False):
+        """录制过程中周期性清理 —— 关键：不再只在断流后才清理"""
+        nonlocal last_clean
+        if not force and a.cleanup_every > 0 and time.time() - last_clean < a.cleanup_every:
+            return
+        last_clean = time.time()
+        cleanup(a.out, a.keep_days, a.keep_gb, a.min_free_gb, protect=active)
+        print('  [状态] 片段 %d 个 / %s，磁盘可用 %.1f GB'
+              % (len(dir_files(a.out)), human(dir_bytes(a.out)), disk_free_gb(a.out)))
+
     while True:
         try:
             resp = urllib.request.urlopen(with_token(a.url), timeout=25)
-            name = os.path.join(a.out, 'cam_%s.ts' % time.strftime('%Y%m%d_%H%M%S'))
+            name = uniq_name(a.out)
             fh = open(name, 'wb')
+            active = name
             nseg += 1
             print('  [新片段] %s' % name)
             buf = b''
@@ -156,20 +258,26 @@ def main():
                     nbytes += seg_bytes
                     print('  [收片段] %s  %s  %.0fs' % (os.path.basename(name),
                                                        human(seg_bytes), time.time() - t0))
+                    active = None
                     if a.mkv:
                         r = remux_ts_to_mkv(name)
                         if r:
                             print('    -> %s' % os.path.basename(r))
-                    name = os.path.join(a.out, 'cam_%s.ts' % time.strftime('%Y%m%d_%H%M%S'))
+                    maybe_clean()
+                    name = uniq_name(a.out)
                     fh = open(name, 'wb')
+                    active = name
                     t0 = time.time()
                     seg_bytes = 0
                     nseg += 1
                     print('  [新片段] %s' % name)
+                else:
+                    maybe_clean()
             try:
                 fh.close()
             except Exception:
                 pass
+            active = None
             nbytes += seg_bytes
             if seg_bytes < 1024:
                 try:
@@ -181,6 +289,7 @@ def main():
                 print('  [收片段] %s  %s' % (os.path.basename(name), human(seg_bytes)))
                 if a.mkv:
                     remux_ts_to_mkv(name)
+            maybe_clean(force=True)
         except KeyboardInterrupt:
             print('\n[*] 用户中断')
             break
@@ -188,12 +297,9 @@ def main():
             print('  [错误] %r  5s 后重连' % (e,))
             time.sleep(5)
             continue
-        if time.time() - last_clean > a.cleanup_every:
-            last_clean = time.time()
-            cleanup(a.out, a.keep_days, a.keep_gb)
         time.sleep(2)
 
-    cleanup(a.out, a.keep_days, a.keep_gb)
+    cleanup(a.out, a.keep_days, a.keep_gb, a.min_free_gb)
     print('[*] 已停止。共 %d 段 / %s' % (nseg, human(nbytes)))
 
 

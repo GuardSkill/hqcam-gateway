@@ -129,8 +129,8 @@ docker run --env-file .env -p 8899:8899 hqcam-gateway:local
 # 网关（默认）
 docker run ... hqcam-gateway
 
-# 分段录像 -> /data/rec
-docker run ... -e HQ_ROLE=recorder -v "$PWD/data:/data" hqcam-gateway
+# 分段录像 -> 挂载点 /rec
+docker run ... -e HQ_ROLE=recorder -v /你的/录像目录:/rec hqcam-gateway
 
 # Home Assistant MQTT 桥
 docker run ... -e HQ_ROLE=bridge -e MQTT_HOST=192.168.0.10 hqcam-gateway
@@ -145,6 +145,29 @@ docker run -it ... hqcam-gateway shell
 docker compose --profile recorder up -d
 docker compose --profile bridge up -d
 ```
+
+## 录像（滚动保留）
+
+录像按 **5 分钟一段**切成独立 `.ts`，每段都能单独播放。保留策略有**三道保险**，
+任意一道触发都会删最旧的片段：
+
+| 变量 | 含义 | 建议 |
+| --- | --- | --- |
+| `HQ_REC_HOST_DIR` | **录像落在宿主的哪个目录**（可指向另一块盘） | `/vol2/1000/hqcam-rec` |
+| `HQ_REC_KEEP_DAYS` | 最多保留几天（滚动覆盖） | `3` |
+| `HQ_REC_KEEP_GB` | 最多占多少 GB | 磁盘的 80%，或 `0` 不限制 |
+| `HQ_REC_MIN_FREE_GB` | 磁盘可用低于此值就强删最旧 | `10` |
+| `HQ_REC_SEG` | 每段秒数 | `300` |
+| `HQ_REC_UID` / `HQ_REC_GID` | 录像文件属主（必须和宿主目录一致） | fnOS：`1000:1001` |
+
+**空间估算**（实测 3K HEVC ≈ 125 KB/s）：
+
+```
+1 小时 ≈ 440 MB     1 天 ≈ 10.5 GB     3 天 ≈ 31 GB
+```
+
+**注意**：清理是在**录制过程中**周期性执行的（`HQ_REC_CLEANUP_EVERY`，默认 300 秒），
+不是只在断流后才做 —— 所以长时间不断流也不会把盘写满。
 
 ## 接入 Home Assistant
 

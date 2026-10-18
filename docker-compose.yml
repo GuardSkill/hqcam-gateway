@@ -46,7 +46,8 @@ services:
   # ---------------------------------------------------------------------------
   # 可选：分段录像（默认不启动）
   #   docker compose --profile recorder up -d
-  # 录像文件落在 ./data/rec
+  # 录像位置由 .env 的 HQ_REC_HOST_DIR 指定（可以指向另一块盘，例如 /vol2/1000/hqcam-rec）
+  # 默认保留 3 天滚动覆盖
   # ---------------------------------------------------------------------------
   hqcam-recorder:
     image: ${HQ_IMAGE:-ghcr.io/your-github-name/hqcam-gateway:latest}
@@ -56,20 +57,28 @@ services:
     restart: unless-stopped
     depends_on:
       - hqcam-gateway
+    # 录像文件的属主必须和宿主目录一致，否则写不进去。
+    # fnOS 的 /vol1/1000、/vol2/1000 属 uid=1000 gid=1001 → 默认 1000:1001
+    user: "${HQ_REC_UID:-1000}:${HQ_REC_GID:-1001}"
     environment:
       HQ_ROLE: recorder
       HQ_PORT: "8899"
       # 录像器也要带上访问令牌才能从网关拉流（留空则网关未开鉴权）
       HQ_TOKEN: ${HQ_TOKEN:-}
       HQ_REC_URL: "http://hqcam-gateway:8899/av.ts"
-      HQ_REC_OUT: /data/rec
+      HQ_REC_OUT: /rec
+      # 每段秒数（300 = 5 分钟一段）
       HQ_REC_SEG: ${HQ_REC_SEG:-300}
-      HQ_REC_KEEP_DAYS: ${HQ_REC_KEEP_DAYS:-7}
-      HQ_REC_KEEP_GB: ${HQ_REC_KEEP_GB:-200}
+      # 滚动保留：超过 3 天 或 超过容量上限 或 磁盘可用不足，都会删最旧的
+      HQ_REC_KEEP_DAYS: ${HQ_REC_KEEP_DAYS:-3}
+      HQ_REC_KEEP_GB: ${HQ_REC_KEEP_GB:-0}
+      HQ_REC_MIN_FREE_GB: ${HQ_REC_MIN_FREE_GB:-10}
+      HQ_REC_CLEANUP_EVERY: ${HQ_REC_CLEANUP_EVERY:-300}
       HQ_REC_MKV: ${HQ_REC_MKV:-}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - ./data:/data
+      # 录像落盘位置：改 .env 的 HQ_REC_HOST_DIR（宿主路径）即可
+      - ${HQ_REC_HOST_DIR:-./data/rec}:/rec
 
   # ---------------------------------------------------------------------------
   # 可选：Home Assistant MQTT 桥（默认不启动）
