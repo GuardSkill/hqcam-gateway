@@ -122,7 +122,10 @@ background:linear-gradient(transparent,rgba(0,0,0,.72));opacity:0;transition:opa
 .video:hover .bar,.video:focus-within .bar{opacity:1}
 .ptz{grid-column:span 4}
 .side{grid-column:span 4}
-.wide{grid-column:span 6}
+.wide{grid-column:span 8}
+.full{grid-column:span 12}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}
+audio{color-scheme:dark;flex:1;min-width:0;height:38px}
 .pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:250px;margin:0 auto}
 .pad button{aspect-ratio:1;border-radius:13px;border:1px solid var(--line);background:var(--card2);
 color:var(--fg);font-size:19px;cursor:pointer;display:flex;align-items:center;justify-content:center;
@@ -171,7 +174,8 @@ border-radius:11px;font-size:13px;opacity:0;transition:all .22s;pointer-events:n
 max-width:88vw;text-align:center;box-shadow:0 12px 30px rgba(0,0,0,.4)}
 #toast.show{opacity:1;transform:translate(-50%,0)}
 @media(max-width:900px){
-  .video,.ptz,.side,.wide{grid-column:span 12}
+  .video,.ptz,.side,.wide,.full{grid-column:span 12}
+  .two{grid-template-columns:1fr;gap:14px}
   main{padding:12px;gap:12px}
 }
 </style>
@@ -257,19 +261,25 @@ max-width:88vw;text-align:center;box-shadow:0 12px 30px rgba(0,0,0,.4)}
   </section>
 
   <!-- 声音 + 状态 -->
-  <section class="card wide">
+  <section class="card full">
     <h2>现场声音 &amp; 运行状态</h2>
-    <div class="row">
-      <audio id="aud" controls style="flex:1;height:38px"></audio>
-      <button class="btn" onclick="listen(this)">▶ 听现场</button>
+    <div class="two">
+      <div>
+        <div class="row">
+          <audio id="aud" controls></audio>
+          <button class="btn" onclick="listen(this)">▶ 听现场</button>
+        </div>
+        <p style="margin:10px 0 0;font-size:11.5px;color:#5d6879;line-height:1.6">
+          点击「听现场」拉取实时音频流（A-law 16kHz → WAV）。</p>
+      </div>
+      <dl class="kv">
+        <dt>视频</dt><dd id="k-video">—</dd>
+        <dt>音频</dt><dd id="k-audio">—</dd>
+        <dt>运行</dt><dd id="k-up">—</dd>
+        <dt>重连</dt><dd id="k-re">—</dd>
+        <dt>对讲已发</dt><dd id="k-talk">—</dd>
+      </dl>
     </div>
-    <dl class="kv" style="margin-top:14px">
-      <dt>视频</dt><dd id="k-video">—</dd>
-      <dt>音频</dt><dd id="k-audio">—</dd>
-      <dt>运行</dt><dd id="k-up">—</dd>
-      <dt>重连</dt><dd id="k-re">—</dd>
-      <dt>对讲已发</dt><dd id="k-talk">—</dd>
-    </dl>
     <details>
       <summary>高级 / 调试接口</summary>
       <div class="links">
