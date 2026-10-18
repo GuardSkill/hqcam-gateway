@@ -69,6 +69,8 @@ services:
       HQ_REC_OUT: /rec
       # 每段秒数（300 = 5 分钟一段）
       HQ_REC_SEG: ${HQ_REC_SEG:-300}
+      # 按日期分子目录：1=开（默认，<out>/2026-10-18/cam_*.ts） 0=平铺
+      HQ_REC_DATE_DIRS: ${HQ_REC_DATE_DIRS:-1}
       # 滚动保留：超过 3 天 或 超过容量上限 或 磁盘可用不足，都会删最旧的
       HQ_REC_KEEP_DAYS: ${HQ_REC_KEEP_DAYS:-3}
       HQ_REC_KEEP_GB: ${HQ_REC_KEEP_GB:-0}

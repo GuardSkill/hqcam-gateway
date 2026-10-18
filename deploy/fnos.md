@@ -57,6 +57,7 @@ HQ_REC_HOST_DIR=/vol2/1000/hqcam-rec
 HQ_REC_UID=1000
 HQ_REC_GID=1001
 HQ_REC_SEG=300
+HQ_REC_DATE_DIRS=1
 HQ_REC_KEEP_DAYS=3
 HQ_REC_KEEP_GB=0
 HQ_REC_MIN_FREE_GB=10
@@ -165,6 +166,9 @@ HQ_REC_GID=1001
 # 每段 5 分钟
 HQ_REC_SEG=300
 
+# 按日期分子目录：1=开（默认，<目录>/2026-10-18/cam_*.ts） 0=平铺
+HQ_REC_DATE_DIRS=1
+
 # 滚动保留：3 天 / 容量上限 / 磁盘底线，三道保险
 HQ_REC_KEEP_DAYS=3
 HQ_REC_KEEP_GB=0
@@ -188,8 +192,9 @@ docker compose logs -f hqcam-recorder
 1 小时 ≈ 800 MB     1 天 ≈ 19 GB     3 天 ≈ 57 GB
 ```
 
-> 录像目录里是 `cam_YYYYMMDD_HHMMSS.ts`，每段独立可播，
-> 用 VLC / PotPlayer / HA 的 media 浏览器都能直接打开。
+> 录像按天分子目录：`/vol2/1000/hqcam-rec/2026-10-18/cam_20261018_213000.ts`，
+> 每段独立可播，用 VLC / PotPlayer / HA 的 media 浏览器都能直接打开。
+> 清理完会顺手删掉空的日期目录；旧的平铺 `cam_*.ts` 也会被识别和清理。
 
 ## 六、接 Home Assistant（可选）
 

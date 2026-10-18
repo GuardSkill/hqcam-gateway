@@ -26,7 +26,12 @@ case "$ROLE" in
   recorder)
     OUT="${HQ_REC_OUT:-/data/rec}"
     mkdir -p "$OUT"
-    echo "[*] 角色: recorder  输出=$OUT"
+    # 默认按日期分子目录（<out>/YYYY-MM-DD/cam_*.ts）；HQ_REC_DATE_DIRS=0 则平铺
+    DATE_DIRS=""
+    if [ "${HQ_REC_DATE_DIRS:-1}" = "0" ]; then
+      DATE_DIRS="--no-date-dirs"
+    fi
+    echo "[*] 角色: recorder  输出=$OUT  日期子目录=${HQ_REC_DATE_DIRS:-1}"
     # shellcheck disable=SC2086
     exec python /app/scripts/hq_recorder.py \
       --url "${HQ_REC_URL:-http://127.0.0.1:$PORT/av.ts}" \
@@ -36,6 +41,7 @@ case "$ROLE" in
       --keep-gb "${HQ_REC_KEEP_GB:-0}" \
       --min-free-gb "${HQ_REC_MIN_FREE_GB:-0}" \
       --cleanup-every "${HQ_REC_CLEANUP_EVERY:-300}" \
+      ${DATE_DIRS} \
       ${HQ_REC_MKV:+--mkv}
     ;;
 

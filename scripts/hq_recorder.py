@@ -12,8 +12,16 @@
 
 特性：
   - 断流自动重连
-  - 保留策略：最多 N 天 / 最多占用 N GB（自动删最旧）
+  - **按日期分子目录**：<out>/2026-10-18/cam_20261018_213000.ts（--no-date-dirs 可关掉）
+  - 保留策略：最多 N 天 / 最多占用 N GB / 磁盘剩余不足（自动删最旧）
   - 落盘目标可以是本地目录，也可以是 fnOS 的 SMB 共享（Windows: \\\\fnOS\\home\\cam）
+
+目录布局（默认）：
+  /rec/
+    2026-10-17/cam_20261017_235500.ts
+    2026-10-18/cam_20261018_000000.ts
+    ...
+  清理时会连空的日期目录一起删掉；旧的平铺文件（/rec/cam_*.ts）也能被识别和清理。
 
 用法：
   python scripts/hq_recorder.py --out "D:/recordings/cam"
@@ -22,6 +30,7 @@
 """
 import sys
 import os
+import re
 import time
 import glob
 import argparse
@@ -58,9 +67,12 @@ def disk_free_gb(path):
 
 
 def dir_files(outdir, exts=('ts', 'mkv')):
+    """递归收集片段（同时兼容「按日期分子目录」和「旧的平铺」两种布局）。
+    glob 的 ** 在 recursive=True 时会匹配零级目录，所以平铺的老文件也能扫到。"""
+    root = glob.escape(outdir)
     files = []
     for e in exts:
-        files += glob.glob(os.path.join(outdir, 'cam_*.%s' % e))
+        files += glob.glob(os.path.join(root, '**', 'cam_*.%s' % e), recursive=True)
     return files
 
 
@@ -72,6 +84,31 @@ def dir_bytes(outdir, exts=('ts', 'mkv')):
         except OSError:
             pass
     return tot
+
+
+DATE_DIR_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def prune_empty_dirs(outdir):
+    """删掉已被清空的日期子目录（只认 YYYY-MM-DD 名字，绝不碰其他目录）"""
+    n = 0
+    try:
+        names = os.listdir(outdir)
+    except OSError:
+        return 0
+    for name in names:
+        if not DATE_DIR_RE.match(name):
+            continue
+        p = os.path.join(outdir, name)
+        if not os.path.isdir(p):
+            continue
+        try:
+            if not os.listdir(p):
+                os.rmdir(p)
+                n += 1
+        except OSError:
+            pass
+    return n
 
 
 def cleanup(outdir, keep_days=0, keep_gb=0, min_free_gb=0, protect=None,
@@ -138,9 +175,11 @@ def cleanup(outdir, keep_days=0, keep_gb=0, min_free_gb=0, protect=None,
         except Exception as e:
             print('   删除失败 %s %r' % (p, e))
     if n:
-        print('  [清理] 删除 %d 个旧片段，释放 %s；现存 %d 段 / %s，磁盘可用 %.1f GB'
+        pruned = prune_empty_dirs(outdir)
+        print('  [清理] 删除 %d 个旧片段，释放 %s；现存 %d 段 / %s，磁盘可用 %.1f GB%s'
               % (n, human(freed), len(dir_files(outdir, exts)),
-                 human(dir_bytes(outdir, exts)), disk_free_gb(outdir)))
+                 human(dir_bytes(outdir, exts)), disk_free_gb(outdir),
+                 ('（并清空 %d 个空日期目录）' % pruned) if pruned else ''))
     return n, freed
 
 
@@ -178,12 +217,19 @@ def remux_ts_to_mkv(ts_path, fps=25):
         return None
 
 
-def uniq_name(outdir):
-    base = time.strftime('%Y%m%d_%H%M%S')
-    p = os.path.join(outdir, 'cam_%s.ts' % base)
+def uniq_name(outdir, date_dirs=True):
+    """生成不重名的片段路径；date_dirs=True 时落到 <outdir>/YYYY-MM-DD/ 下"""
+    now = time.time()
+    base = time.strftime('%Y%m%d_%H%M%S', time.localtime(now))
+    d = outdir
+    if date_dirs:
+        d = os.path.join(outdir, time.strftime('%Y-%m-%d', time.localtime(now)))
+        # 跨天时目录还不存在 —— 每段都确保一次（存在则无开销）
+        os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, 'cam_%s.ts' % base)
     k = 1
     while os.path.exists(p):
-        p = os.path.join(outdir, 'cam_%s_%d.ts' % (base, k))
+        p = os.path.join(d, 'cam_%s_%d.ts' % (base, k))
         k += 1
     return p
 
@@ -200,8 +246,11 @@ def main():
     ap.add_argument('--mkv', action='store_true', help='收段后转成 .mkv')
     ap.add_argument('--cleanup-every', type=int, default=300,
                     help='清理间隔秒数（录制过程中也会执行）')
+    ap.add_argument('--no-date-dirs', action='store_true',
+                    help='不要按日期分子目录，全部平铺在 --out 下（旧行为）')
     a = ap.parse_args()
 
+    date_dirs = not a.no_date_dirs
     os.makedirs(a.out, exist_ok=True)
 
     # 启动先清理一次（容器重启后立刻恢复滚动状态）
@@ -210,11 +259,23 @@ def main():
     print('[*] 录像器启动')
     print('    拉流: %s' % a.url)
     print('    落盘: %s' % os.path.abspath(a.out))
+    print('    布局: %s' % ('按日期分子目录  <out>/YYYY-MM-DD/cam_*.ts' if date_dirs
+                          else '平铺  <out>/cam_*.ts'))
     print('    分段: %ds' % a.seg)
     print('    保留: %s 天 / %s GB / 可用低于 %s GB 时强删'
           % (a.keep_days or '∞', a.keep_gb or '∞', a.min_free_gb or '关'))
     print('    当前: %d 段 / %s，磁盘可用 %.1f GB'
           % (len(dir_files(a.out)), human(dir_bytes(a.out)), disk_free_gb(a.out)))
+
+    def new_name():
+        return uniq_name(a.out, date_dirs)
+
+    def rel(p):
+        """日志里显示相对于落盘根目录的路径（跨平台统一用 /）"""
+        try:
+            return os.path.relpath(p, a.out).replace(os.sep, '/')
+        except Exception:
+            return p
 
     nseg = 0
     nbytes = 0
@@ -234,11 +295,11 @@ def main():
     while True:
         try:
             resp = urllib.request.urlopen(with_token(a.url), timeout=25)
-            name = uniq_name(a.out)
+            name = new_name()
             fh = open(name, 'wb')
             active = name
             nseg += 1
-            print('  [新片段] %s' % name)
+            print('  [新片段] %s' % rel(name))
             buf = b''
             t0 = time.time()
             seg_bytes = 0
@@ -256,21 +317,21 @@ def main():
                 if time.time() - t0 >= a.seg:
                     fh.close()
                     nbytes += seg_bytes
-                    print('  [收片段] %s  %s  %.0fs' % (os.path.basename(name),
+                    print('  [收片段] %s  %s  %.0fs' % (rel(name),
                                                        human(seg_bytes), time.time() - t0))
                     active = None
                     if a.mkv:
                         r = remux_ts_to_mkv(name)
                         if r:
-                            print('    -> %s' % os.path.basename(r))
+                            print('    -> %s' % rel(r))
                     maybe_clean()
-                    name = uniq_name(a.out)
+                    name = new_name()
                     fh = open(name, 'wb')
                     active = name
                     t0 = time.time()
                     seg_bytes = 0
                     nseg += 1
-                    print('  [新片段] %s' % name)
+                    print('  [新片段] %s' % rel(name))
                 else:
                     maybe_clean()
             try:
@@ -284,9 +345,9 @@ def main():
                     os.remove(name)
                 except Exception:
                     pass
-                print('  [丢弃] 片段过小')
+                print('  [丢弃] 片段过小 %s' % rel(name))
             else:
-                print('  [收片段] %s  %s' % (os.path.basename(name), human(seg_bytes)))
+                print('  [收片段] %s  %s' % (rel(name), human(seg_bytes)))
                 if a.mkv:
                     remux_ts_to_mkv(name)
             maybe_clean(force=True)
