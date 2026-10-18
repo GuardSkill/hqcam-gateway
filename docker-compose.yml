@@ -79,6 +79,10 @@ services:
     volumes:
       # 录像落盘位置：改 .env 的 HQ_REC_HOST_DIR（宿主路径）即可
       - ${HQ_REC_HOST_DIR:-./data/rec}:/rec
+    # 镜像自带的 healthcheck 是探测网关的 8899，录像器没有 HTTP 服务 → 必须关掉，
+    # 否则容器会一直显示 unhealthy
+    healthcheck:
+      disable: true
 
   # ---------------------------------------------------------------------------
   # 可选：Home Assistant MQTT 桥（默认不启动）
@@ -104,3 +108,6 @@ services:
       MQTT_PASS: ${MQTT_PASS:-}
       MQTT_SNAP_INTERVAL: ${MQTT_SNAP_INTERVAL:-10}
       TZ: ${TZ:-Asia/Shanghai}
+    # 同 recorder：镜像的 healthcheck 探的是网关 8899，桥接角色没有 HTTP 服务
+    healthcheck:
+      disable: true
