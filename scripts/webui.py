@@ -224,6 +224,12 @@ max-width:88vw;text-align:center;box-shadow:0 12px 30px rgba(0,0,0,.4)}
       <button data-ms="500" class="on">中 500ms</button>
       <button data-ms="1200">长 1.2s</button>
     </div>
+    <div class="seg" style="margin-top:8px">
+      <button data-dir="zoomin">🔍 拉近</button>
+      <button data-dir="zoomout">🔍 推远</button>
+      <button data-dir="lighton">💡 开灯</button>
+      <button data-dir="lightoff">💡 关灯</button>
+    </div>
   </section>
 
   <!-- 音量 + 状态 -->
