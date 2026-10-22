@@ -88,18 +88,39 @@ def offline_jpeg(w=960):
         w = max(320, int(w))
         im = Image.new('RGB', (w, int(w * 9 / 16)), (22, 24, 30))
         d = ImageDraw.Draw(im)
+        px = max(16, w // 28)
         try:
-            f = ImageFont.truetype('DejaVuSans.ttf', max(14, w // 40))
+            f = ImageFont.truetype('DejaVuSans.ttf', px)
         except Exception:
-            f = ImageFont.load_default()
+            # slim 镜像里没有 DejaVu，用默认字体的可缩放版本（Pillow >= 10.1）
+            try:
+                f = ImageFont.load_default(size=px)
+            except Exception:
+                f = ImageFont.load_default()
         txt = 'CAMERA OFFLINE'
         try:
             bb = d.textbbox((0, 0), txt, font=f)
             tw, th = bb[2] - bb[0], bb[3] - bb[1]
         except Exception:
             tw, th = len(txt) * 8, 12
-        d.text(((im.width - tw) // 2, (im.height - th) // 2), txt,
-               fill=(140, 148, 165), font=f)
+        y = (im.height - th) // 2
+        d.text(((im.width - tw) // 2, y), txt, fill=(155, 163, 180), font=f)
+        sub = 'waiting for camera to come back'
+        spx = max(11, px // 3)
+        try:
+            fs = ImageFont.truetype('DejaVuSans.ttf', spx)
+        except Exception:
+            try:
+                fs = ImageFont.load_default(size=spx)
+            except Exception:
+                fs = ImageFont.load_default()
+        try:
+            sb = d.textbbox((0, 0), sub, font=fs)
+            sw, sh = sb[2] - sb[0], sb[3] - sb[1]
+        except Exception:
+            sw, sh = len(sub) * 6, 10
+        d.text(((im.width - sw) // 2, y + th + spx), sub,
+               fill=(92, 99, 114), font=fs)
         b = io.BytesIO()
         im.save(b, 'JPEG', quality=70)
         data = b.getvalue()
