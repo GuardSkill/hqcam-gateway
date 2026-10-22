@@ -336,6 +336,11 @@ max-width:88vw;text-align:center;box-shadow:0 12px 30px rgba(0,0,0,.4)}
     phtxt.textContent = '画面加载失败，点「重连」或稍候自动重试';
     setTimeout(refreshLive, 6000);
   });
+  /* 服务端 /mjpeg 单连接有上限（默认 2 小时），到期会主动关闭连接。
+     流正常结束时 <img> 不会触发 error，只会定格，所以定期静默换一条新流。 */
+  setInterval(function(){
+    live.src = '/mjpeg?w=960&fps=2&t=' + Date.now();
+  }, 15 * 60 * 1000);
   window.refreshLive = refreshLive;
   refreshLive();
 

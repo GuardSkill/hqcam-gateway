@@ -32,6 +32,12 @@ services:
       HQ_TOKEN:  ${HQ_TOKEN:-}
       HQ_PORT:   "8899"
       HQ_HOST:   "0.0.0.0"
+      # 摄像头离线时别失控：拉流空闲阈值 + 重连退避（详见 .env.example）
+      HQ_STREAM_IDLE: ${HQ_STREAM_IDLE:-20}
+      HQ_RECONNECT_MIN: ${HQ_RECONNECT_MIN:-3}
+      HQ_RECONNECT_MAX: ${HQ_RECONNECT_MAX:-60}
+      HQ_RECONNECT_STABLE: ${HQ_RECONNECT_STABLE:-30}
+      HQ_MJPEG_MAX_SECS: ${HQ_MJPEG_MAX_SECS:-7200}
       TZ:        ${TZ:-Asia/Shanghai}
     volumes:
       - ./data:/data

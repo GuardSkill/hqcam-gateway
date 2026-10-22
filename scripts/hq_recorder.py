@@ -292,6 +292,7 @@ def main():
         print('  [状态] 片段 %d 个 / %s，磁盘可用 %.1f GB'
               % (len(dir_files(a.out)), human(dir_bytes(a.out)), disk_free_gb(a.out)))
 
+    fails = 0
     while True:
         try:
             resp = urllib.request.urlopen(with_token(a.url), timeout=25)
@@ -345,8 +346,10 @@ def main():
                     os.remove(name)
                 except Exception:
                     pass
-                print('  [丢弃] 片段过小 %s' % rel(name))
+                fails += 1
+                print('  [丢弃] 片段过小 %s（连续失败 %d）' % (rel(name), fails))
             else:
+                fails = 0
                 print('  [收片段] %s  %s' % (rel(name), human(seg_bytes)))
                 if a.mkv:
                     remux_ts_to_mkv(name)
@@ -355,10 +358,13 @@ def main():
             print('\n[*] 用户中断')
             break
         except Exception as e:
-            print('  [错误] %r  5s 后重连' % (e,))
-            time.sleep(5)
+            fails += 1
+            d = min(60, 2 * (2 ** min(fails, 5)))
+            print('  [错误] %r  %ds 后重连（连续失败 %d）' % (e, d, fails))
+            time.sleep(d)
             continue
-        time.sleep(2)
+        # 摄像头离线时别每 2 秒打一次：连续失败按指数退避，最长 60 秒
+        time.sleep(min(60, 2 * (2 ** min(fails, 5))) if fails else 2)
 
     cleanup(a.out, a.keep_days, a.keep_gb, a.min_free_gb)
     print('[*] 已停止。共 %d 段 / %s' % (nseg, human(nbytes)))

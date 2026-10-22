@@ -33,6 +33,7 @@
   python scripts/hq_live_server.py [--port 8899] [--host 0.0.0.0]
 """
 import sys, os, io, re, json, time, struct, socket, queue, threading, hashlib, argparse
+import select, signal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -55,6 +56,68 @@ SUF = b'DaNalEsZX'
 ACCESS_TOKEN = cfg.token or ''
 # 登录失败计数（只用于递增延时，防脚本爆破；成功即清零）
 LOGIN_FAIL = {'n': 0}
+
+# ★ 上游空闲阈值：这么多秒收不到任何媒体数据，就把所有拉流连接主动断开。
+#   背景（2026-10-22 事故）：摄像头拔掉后上游永久连不上，而 /live.ts、/av.ts
+#   等端点用无超时的 q.get() 等数据 -> 线程永久挂住；录像容器每 25 秒重连一次
+#   -> 29 小时累积 1655 个挂死线程，CPU 打满 4 核、healthcheck 连续失败。
+STREAM_IDLE = float(os.environ.get('HQ_STREAM_IDLE', '20'))
+
+# /mjpeg 单连接最长存活秒数（兜底：万一客户端断开检测失效也能回收线程）
+MJPEG_MAX_SECS = float(os.environ.get('HQ_MJPEG_MAX_SECS', '7200'))
+
+# 上游重连退避：3s -> 6 -> 12 -> 24 -> 48 -> 60 封顶。
+#   原来固定 3 秒且"正常 EOF"分支根本不等待，设备拔掉后会对云 API 疯狂登录
+#   （29 小时 ~3.5 万次），CPU 全耗在 TLS 握手上。
+RECONNECT_MIN = float(os.environ.get('HQ_RECONNECT_MIN', '3'))
+RECONNECT_MAX = float(os.environ.get('HQ_RECONNECT_MAX', '60'))
+# 连接存活超过这个秒数就认为"这次是成功的"，退避计数清零
+RECONNECT_STABLE = float(os.environ.get('HQ_RECONNECT_STABLE', '30'))
+
+# 离线占位帧缓存
+_OFFLINE = {'jpg': None}
+
+
+def offline_jpeg(w=960):
+    """上游离线时给 /mjpeg 推的占位帧（深灰底 + 文案），只生成一次。"""
+    if _OFFLINE['jpg'] is not None:
+        return _OFFLINE['jpg']
+    data = b''
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        w = max(320, int(w))
+        im = Image.new('RGB', (w, int(w * 9 / 16)), (22, 24, 30))
+        d = ImageDraw.Draw(im)
+        try:
+            f = ImageFont.truetype('DejaVuSans.ttf', max(14, w // 40))
+        except Exception:
+            f = ImageFont.load_default()
+        txt = 'CAMERA OFFLINE'
+        try:
+            bb = d.textbbox((0, 0), txt, font=f)
+            tw, th = bb[2] - bb[0], bb[3] - bb[1]
+        except Exception:
+            tw, th = len(txt) * 8, 12
+        d.text(((im.width - tw) // 2, (im.height - th) // 2), txt,
+               fill=(140, 148, 165), font=f)
+        b = io.BytesIO()
+        im.save(b, 'JPEG', quality=70)
+        data = b.getvalue()
+    except Exception as e:
+        print('[mjpeg] 占位帧生成失败 %r' % (e,), flush=True)
+    _OFFLINE['jpg'] = data
+    return data
+
+
+def peer_gone(conn):
+    """非阻塞探测客户端是否已断开（MJPEG 是单向流，客户端只会发 FIN）。"""
+    try:
+        r, _, _ = select.select([conn], [], [], 0)
+        if not r:
+            return False
+        return conn.recv(1, socket.MSG_PEEK) == b''
+    except Exception:
+        return True
 
 
 def render_login(err=''):
@@ -130,6 +193,8 @@ class Hub:
         self.lock = threading.Lock()
         self.stats = {'frames': 0, 'bytes': 0, 'au': 0, 'start': time.time(),
                       'reconnects': 0, 'sk': '', 'relay': ''}
+        # 最近一次收到数据的时间（流端点据此判断上游是否还活着）
+        self.last_data = time.time()
 
     def subscribe(self):
         q = queue.Queue(maxsize=600)
@@ -144,6 +209,7 @@ class Hub:
 
     def broadcast(self, au):
         self.stats['au'] += 1
+        self.last_data = time.time()
         with self.lock:
             dead = []
             for q in self.subs:
@@ -170,6 +236,28 @@ def rx_log(who, body):
 
 
 AHUB = Hub()          # 音频订阅中心（第二条 relay 连接，tag=0x2000）
+
+# 流端点哨兵：_END = 上游已离线，应主动断开；None = 本轮没数据，继续等
+_END = object()
+
+
+def backoff_delay(fails):
+    """重连退避秒数：3 / 6 / 12 / 24 / 48 / 60(封顶)。"""
+    if fails <= 0:
+        return RECONNECT_MIN
+    return min(RECONNECT_MAX, RECONNECT_MIN * (2 ** min(fails - 1, 6)))
+
+
+def q_next(q, hub, idle=None, timeout=1.0):
+    """带空闲超时的订阅队列取数（避免上游掉线后线程永久挂住）。
+
+    返回 数据块 / None（本轮无数据，继续）/ _END（上游 idle 秒无数据，断开）。
+    """
+    idle = STREAM_IDLE if idle is None else idle
+    try:
+        return q.get(timeout=timeout)
+    except queue.Empty:
+        return _END if time.time() - hub.last_data > idle else None
 SNAP = {'jpg': None, 'small': None, 'ts': 0, 'want': threading.Event(),
         'lock': threading.Lock(), 'err': None}
 
@@ -482,12 +570,16 @@ class Source(threading.Thread):
 
     # ---- 主循环 ----
     def run(self):
+        fails = 0
         while not self.stop_flag.is_set():
+            t_conn = 0.0
+            err = None
             try:
                 self.state = 'connecting'
                 self.connect()
+                t_conn = time.time()
                 self.state = 'live'
-                _ka_t = [time.time()]
+                fails = 0
                 last_ka = [0.0]
                 _, r = self.send('StartVideo', PAY_STARTVIDEO, wait=5.0)
                 print('    [src] StartVideo -> %s' % (r.get('f7') if r else 'timeout'))
@@ -499,21 +591,20 @@ class Source(threading.Thread):
                             try:
                                 self.sock.sendall(KEEPALIVE)
                             except Exception:
+                                err = 'keepalive failed'
                                 break
                     try:
                         d = self.sock.recv(262144)
                     except socket.timeout:
                         continue
                     if not d:
+                        err = 'EOF'
                         break
                     HUB.stats['bytes'] += len(d)
                     self.pend += d
                     self.consume()
             except Exception as e:
-                print('    [src] err %r  -> reconnect in 3s' % (e,))
-                self.state = 'error'
-                HUB.stats['reconnects'] += 1
-                time.sleep(3)
+                err = e
             finally:
                 try:
                     self.sock.close()
@@ -525,6 +616,19 @@ class Source(threading.Thread):
                 self.cur = None
                 self.search = 0
                 self.decoder = None
+            if self.stop_flag.is_set():
+                break
+            lived = (time.time() - t_conn) if t_conn else 0.0
+            if lived > RECONNECT_STABLE:
+                fails = 0
+            else:
+                fails += 1
+            self.state = 'error'
+            HUB.stats['reconnects'] += 1
+            delay = backoff_delay(fails)
+            print('    [src] %r  存活 %.0fs -> %.0fs 后重连（连续失败 %d）'
+                  % (err, lived, delay, fails), flush=True)
+            self.stop_flag.wait(delay)
 
     def consume(self):
         b = bytes(self.pend)
@@ -747,11 +851,16 @@ class AudioSource(threading.Thread):
         return n
 
     def run(self):
+        fails = 0
         while not self.stop_flag.is_set():
+            t_conn = 0.0
+            err = None
             try:
                 self.state = 'connecting'
                 self.connect()
+                t_conn = time.time()
                 self.state = 'live'
+                fails = 0
                 with self.wlock:
                     self.sock.sendall(plain_rpc('StartAudio', bytes.fromhex('0800'), session=1))
                 print('    [asrc] StartAudio 已发送')
@@ -764,25 +873,37 @@ class AudioSource(threading.Thread):
                             try:
                                 self.sock.sendall(KEEPALIVE)
                             except Exception:
+                                err = 'keepalive failed'
                                 break
                     try:
                         d = self.sock.recv(262144)
                     except socket.timeout:
                         continue
                     if not d:
+                        err = 'EOF'
                         break
                     self.pend += d
                     self.consume()
             except Exception as e:
-                print('    [asrc] err %r -> reconnect 3s' % (e,))
-                self.state = 'error'
-                AHUB.stats['reconnects'] += 1
-                time.sleep(3)
+                err = e
             finally:
                 try:
                     self.sock.close()
                 except Exception:
                     pass
+            if self.stop_flag.is_set():
+                break
+            lived = (time.time() - t_conn) if t_conn else 0.0
+            if lived > RECONNECT_STABLE:
+                fails = 0
+            else:
+                fails += 1
+            self.state = 'error'
+            AHUB.stats['reconnects'] += 1
+            delay = backoff_delay(fails)
+            print('    [asrc] %r  存活 %.0fs -> %.0fs 后重连（连续失败 %d）'
+                  % (err, lived, delay, fails), flush=True)
+            self.stop_flag.wait(delay)
 
 
 ASRC = AudioSource()
@@ -1213,10 +1334,14 @@ class H(BaseHTTPRequestHandler):
         q = HUB.subscribe()
         try:
             while True:
-                au = q.get()
-                if au is None:
+                au = q_next(q, HUB)
+                if au is _END:
                     break
+                if au is None:
+                    continue
                 self.wfile.write(au)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         finally:
             HUB.unsubscribe(q)
 
@@ -1232,9 +1357,11 @@ class H(BaseHTTPRequestHandler):
             st.time_base = Fraction(1, 90000)
             i = 0
             while True:
-                au = q.get()
-                if au is None:
+                au = q_next(q, HUB)
+                if au is _END:
                     break
+                if au is None:
+                    continue
                 pk = av.Packet(au)
                 pk.stream = st
                 pk.pts = pk.dts = int(i * 3600)
@@ -1309,7 +1436,10 @@ class H(BaseHTTPRequestHandler):
                     for pk in sa.encode(fr):
                         out.mux(pk)
                 if not got:
-                    time.sleep(0.008)
+                    # 上游离线则主动断开（否则这个连接会永久挂住，录像容器每次重连都漏一个）
+                    if time.time() - max(HUB.last_data, AHUB.last_data) > STREAM_IDLE:
+                        break
+                    time.sleep(0.02)
         except Exception as e:
             print('[av.ts] %r' % (e,))
         finally:
@@ -1327,10 +1457,14 @@ class H(BaseHTTPRequestHandler):
         q = AHUB.subscribe()
         try:
             while True:
-                d = q.get()
-                if d is None:
+                d = q_next(q, AHUB)
+                if d is _END:
                     break
+                if d is None:
+                    continue
                 self.wfile.write(d)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         finally:
             AHUB.unsubscribe(q)
 
@@ -1345,10 +1479,14 @@ class H(BaseHTTPRequestHandler):
         q = AHUB.subscribe()
         try:
             while True:
-                d = q.get()
-                if d is None:
+                d = q_next(q, AHUB)
+                if d is _END:
                     break
+                if d is None:
+                    continue
                 self.wfile.write(b''.join(struct.pack('<h', alaw2lin(x)) for x in d))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         finally:
             AHUB.unsubscribe(q)
 
@@ -1370,6 +1508,14 @@ class H(BaseHTTPRequestHandler):
 
         为什么不用 /av.ts 做预览：浏览器基本不支持 HEVC-in-TS，画面会黑屏。
         MJPEG 用的是解码后的缩略图（宽 960），2fps 在 NAS 上 CPU 占用很低。
+
+        ★ 2026-10-22 修复：原来这里是个无出口的 while True ——
+          上游掉线时永远等不到帧，只 sleep(0.5) 继续等，既不检测客户端断开
+          也不检测上游状态。浏览器每次刷新/重开标签都会漏一个线程，29 小时
+          累积 1655 个，CPU 被 GIL 争抢打满。现在：
+            1) 每轮探测客户端是否已断开（select + MSG_PEEK）
+            2) 上游离线时推"CAMERA OFFLINE"占位帧，不再空等
+            3) 单连接最长 MJPEG_MAX_SECS 秒，兜底回收
         """
         try:
             fps = float((q.get('fps') or ['2'])[0])
@@ -1386,30 +1532,43 @@ class H(BaseHTTPRequestHandler):
         self.send_header('Connection', 'close')
         self.end_headers()
         last = 0.0
+        t_start = time.time()
+        interval = 1.0 / fps
         try:
             while True:
+                if peer_gone(self.connection):
+                    break
+                if time.time() - t_start > MJPEG_MAX_SECS:
+                    break
                 SNAP['want'].set()
                 t0 = time.time()
                 got = None
-                while time.time() - t0 < 5:
+                while time.time() - t0 < min(5.0, interval + 0.5):
                     with SNAP['lock']:
                         j = SNAP['small'] if w <= 1280 else SNAP['jpg']
                         ts = SNAP['ts']
                     if j and ts > last:
                         got, last = j, ts
                         break
+                    if peer_gone(self.connection):
+                        return
                     time.sleep(0.05)
                 if got is None:
-                    time.sleep(0.5)
-                    continue
+                    if time.time() - SNAP['ts'] > 3:
+                        got = offline_jpeg(min(w, 960))
+                    if not got:
+                        time.sleep(0.5)
+                        continue
                 self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\n'
                                  b'Content-Length: ' + str(len(got)).encode() + b'\r\n\r\n')
                 self.wfile.write(got)
                 self.wfile.write(b'\r\n')
                 self.wfile.flush()
-                time.sleep(max(0.0, 1.0 / fps - (time.time() - t0)))
+                time.sleep(max(0.0, interval - (time.time() - t0)))
         except (BrokenPipeError, ConnectionResetError):
             pass
+        finally:
+            self.close_connection = True
 
     # ---- 对讲上行 ----
     def serve_talk(self, body, kind, q=None):
@@ -1627,11 +1786,23 @@ def main():
     ap.add_argument('--port', type=int, default=8899)
     ap.add_argument('--host', default='0.0.0.0')
     a = ap.parse_args()
+
+    # ★ 容器里本进程就是 PID 1，而 Docker 的 HEALTHCHECK 每 30 秒会在容器内
+    #   exec 一个 python 进程，它的父进程就是 PID 1。python 不会 wait 这些
+    #   非 subprocess 创建的进程 -> 每个 healthcheck 都留一个僵尸。
+    #   置 SIGCHLD=SIG_IGN 让内核自动回收（本服务不依赖 subprocess 的返回值）。
+    try:
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        print('[*] SIGCHLD=SIG_IGN：子进程自动回收（防僵尸堆积）')
+    except Exception as e:
+        print('[!] 设置 SIGCHLD 失败：%r' % (e,))
+
     print('[*] 启动取流源 ...')
     SRC.start()
     ASRC.start()
     print('[*] HTTP 网关 http://127.0.0.1:%d/' % a.port)
     srv = ThreadingHTTPServer((a.host, a.port), H)
+    srv.daemon_threads = True
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

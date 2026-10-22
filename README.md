@@ -142,6 +142,9 @@ docker run --env-file .env -p 8899:8899 hqcam-gateway:local
 | `HQ_PORT` | | 容器内监听端口，默认 `8899` |
 | `HQ_HOST` | | 监听地址，默认 `0.0.0.0` |
 | `HQ_ROLE` | | `gateway`(默认) / `recorder` / `bridge` / `shell` |
+| `HQ_STREAM_IDLE` | | 上游空闲多少秒就断开拉流连接，默认 `20` |
+| `HQ_RECONNECT_MIN` / `_MAX` / `_STABLE` | | 重连退避，默认 `3` / `60` / `30` 秒 |
+| `HQ_MJPEG_MAX_SECS` | | 预览单连接最长秒数，默认 `7200` |
 | `HQ_REC_*` | | 录像参数，见 `.env.example` |
 | `MQTT_*` | | MQTT 桥参数，见 `.env.example` |
 
@@ -269,9 +272,25 @@ curl "http://<网关IP>:8899/talk/tone?hz=1000&ms=3000&vol=100&token=<TOKEN>"
 sudo docker build -t ghcr.io/<你的github用户名>/hqcam-gateway:latest .
 ```
 
+**摄像头拔掉 / 断电了，网关会不会失控？**
+不会。设备离线时网关仍然正常工作（`/status.json` 照常 200，容器保持 healthy），
+只会一直尝试重连，并且有明确的刹车：
+
+| 行为 | 说明 |
+| --- | --- |
+| 重连退避 | 3s → 6 → 12 → 24 → 48 → **60s 封顶**；连上后稳定跑过 30 秒即重置 |
+| 拉流空闲断开 | `/live.ts`、`/av.ts`、`/audio.wav` 等上游 `HQ_STREAM_IDLE`（默认 20s）无数据就主动断开，避免录像容器每次重连都漏一个挂死线程 |
+| 预览占位 | Web 控制台的 `/mjpeg` 显示 `CAMERA OFFLINE` 占位帧，而不是卡住或空白 |
+| 客户端断开回收 | `/mjpeg` 每轮探测客户端是否已断开，浏览器反复刷新不会累积线程 |
+| 子进程回收 | 进程是容器 PID 1，设置了 `SIGCHLD=SIG_IGN`，healthcheck 的临时进程不会变僵尸 |
+
+**注意**：Web 控制台里的云台、音量、对讲在设备离线时会超时无响应，这是正常的。
+
 **容器起来了但一直 unhealthy？**
 首次启动需要完成云端登录 + relay 握手，约 5–15 秒；`start_period` 已给到 25 秒。
 若持续不健康，看日志：`docker compose logs -f hqcam-gateway`。
+如果是**设备离线期间**变 unhealthy，请升级到 2026-10-22 之后的版本
+（旧版在离线时会把线程/进程堆到打满 CPU，进而让 healthcheck 超时）。
 
 **登录失败？**
 确认账号密码正确、且该账号已在该 App 中绑定这台设备。
