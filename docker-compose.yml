@@ -82,6 +82,8 @@ services:
       HQ_REC_KEEP_GB: ${HQ_REC_KEEP_GB:-0}
       HQ_REC_MIN_FREE_GB: ${HQ_REC_MIN_FREE_GB:-10}
       HQ_REC_CLEANUP_EVERY: ${HQ_REC_CLEANUP_EVERY:-300}
+      # 小于这个 KB 数的片段视为空壳，直接删（摄像头离线时每轮重连都产生一个）
+      HQ_REC_MIN_SEG_KB: ${HQ_REC_MIN_SEG_KB:-64}
       HQ_REC_MKV: ${HQ_REC_MKV:-}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:

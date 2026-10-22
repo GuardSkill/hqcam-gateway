@@ -44,6 +44,10 @@ except ImportError:
 
 TS_PKT = 188
 
+# 小于这个字节数的片段视为"空壳"（只有 TS 头、没有画面），收段即删，
+# 清理时也会顺带删掉历史遗留。正常 5 分钟片段约 45MB，远高于此值。
+MIN_SEG_BYTES = int(os.environ.get('HQ_REC_MIN_SEG_KB', '64')) * 1024
+
 
 def human(n):
     for u in ('B', 'KB', 'MB', 'GB', 'TB'):
@@ -123,6 +127,22 @@ def cleanup(outdir, keep_days=0, keep_gb=0, min_free_gb=0, protect=None,
 
     removed = []
 
+    def sz(p):
+        try:
+            return os.path.getsize(p)
+        except OSError:
+            return 0
+
+    # ⓿ 空壳片段：摄像头离线时每次重连都会建一个只有 TS 头的小文件
+    #    （几十字节~几 KB，0 秒画面），不清理就会在目录里堆几千个。
+    #    protect（正在写的那个）已在上面排除，不会误删。
+    if MIN_SEG_BYTES > 0:
+        tiny = [p for p in files if sz(p) < MIN_SEG_BYTES]
+        if tiny:
+            ts = set(tiny)
+            removed.extend(tiny)
+            files = [p for p in files if p not in ts]
+
     # ① 超过保留天数
     if keep_days > 0:
         cutoff = time.time() - keep_days * 86400
@@ -137,12 +157,6 @@ def cleanup(outdir, keep_days=0, keep_gb=0, min_free_gb=0, protect=None,
             else:
                 keep.append(p)
         files = keep
-
-    def sz(p):
-        try:
-            return os.path.getsize(p)
-        except OSError:
-            return 0
 
     # ② 超过总容量上限
     if keep_gb > 0:
@@ -341,7 +355,7 @@ def main():
                 pass
             active = None
             nbytes += seg_bytes
-            if seg_bytes < 1024:
+            if seg_bytes < MIN_SEG_BYTES:
                 try:
                     os.remove(name)
                 except Exception:
